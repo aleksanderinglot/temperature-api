@@ -1,50 +1,66 @@
 package com.example.temperatureapi;
 
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 
-import java.io.BufferedReader;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.DoubleSummaryStatistics;
 import java.util.List;
-import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
+@Slf4j
 @RequiredArgsConstructor
 public class TemperatureDataProcessor {
-    private final String city;
+    private final ConcurrentHashMap<String, DoubleSummaryStatistics> yearlyTemperatureData = new ConcurrentHashMap<>();
 
-    public List<YearlyAverageTemperature> calculateYearlyAverageTemperatures(Path filePath) {
-        Map<String, Double[]> yearlyTemperatureData = new HashMap<>();
+    public List<YearlyAverageTemperature> processTemperatureData(Path filePath, String city) {
+        yearlyTemperatureData.clear();
+        List<TemperatureData> dataList = readTemperatureData(filePath, city);
+        return calculateYearlyAverageTemperatures(dataList);
+    }
 
-        try (BufferedReader reader = Files.newBufferedReader(filePath)) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                String[] parts = line.split(";");
-                String cityName = parts[0];
-                String dateStr = parts[1];
-                double temperature = Double.parseDouble(parts[2]);
+    private List<TemperatureData> readTemperatureData(Path filePath, String city) {
+        List<TemperatureData> dataList = new ArrayList<>();
 
-                if (cityName.equals(city)) {
-                    String year = dateStr.substring(0, 4);
-                    Double[] sumAndCount = yearlyTemperatureData.getOrDefault(year, new Double[]{0.0, 0.0});
-                    sumAndCount[0] += temperature;
-                    sumAndCount[1]++;
-                    yearlyTemperatureData.put(year, sumAndCount);
-                }
-            }
+        try (Stream<String> lines = Files.lines(filePath)) {
+            dataList = lines
+                    .map(line -> line.split(";"))
+                    .filter(parts -> parts.length >= 3)
+                    .filter(parts -> parts[0].equals(city))
+                    .map(parts -> {
+                        String cityName = parts[0];
+                        String dateStr = parts[1];
+                        double temperature = Double.parseDouble(parts[2]);
+                        return new TemperatureData(cityName, dateStr, temperature);
+                    })
+                    .collect(Collectors.toList());
         } catch (IOException e) {
-            e.printStackTrace();
+            log.error("An error occurred while reading temperature data from file: {}", filePath, e);
         }
 
-        List<YearlyAverageTemperature> yearlyAverages = new ArrayList<>();
-        for (Map.Entry<String, Double[]> entry : yearlyTemperatureData.entrySet()) {
-            String year = entry.getKey();
-            Double[] sumAndCount = entry.getValue();
-            double averageTemperature = sumAndCount[0] / sumAndCount[1];
-            yearlyAverages.add(new YearlyAverageTemperature(year, averageTemperature));
-        }
+        return dataList;
+    }
+
+    private List<YearlyAverageTemperature> calculateYearlyAverageTemperatures(List<TemperatureData> dataList) {
+        dataList.parallelStream().forEach(data -> {
+            String year = data.getDateStr().substring(0, 4);
+            double temperature = data.getTemperature();
+            yearlyTemperatureData.computeIfAbsent(year, k -> new DoubleSummaryStatistics()).accept(temperature);
+        });
+
+        List<YearlyAverageTemperature> yearlyAverages = yearlyTemperatureData.entrySet().parallelStream()
+                .map(entry -> {
+                    String year = entry.getKey();
+                    DoubleSummaryStatistics stats = entry.getValue();
+                    double averageTemperature = stats.getAverage();
+                    return new YearlyAverageTemperature(year, averageTemperature);
+                })
+                .collect(Collectors.toList());
 
         return yearlyAverages;
     }
